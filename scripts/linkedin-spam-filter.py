@@ -299,6 +299,7 @@ def check_linkedin_messages(dry_run=False):
                     "sender": sender,
                     "message_id": msg_id,
                     "text_preview": text[:200],
+                    "text_full": text,  # Full message for review
                     "matches": matches[:5],
                     "suggested_response": suggestion,
                     "status": "pending_confirmation",
