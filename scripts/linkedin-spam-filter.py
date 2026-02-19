@@ -39,10 +39,10 @@ SPAM_PATTERNS = os.environ.get("SPAM_PATTERNS", DEFAULT_PATTERNS)
 
 # Response templates
 DEFAULT_TEMPLATES = {
-    "recruiter_en": "Hi {name}, thanks for reaching out! I'm not actively looking for new opportunities at the moment, but feel free to connect — I'm always open to interesting conversations.",
-    "recruiter_fr": "Bonjour {name}, merci pour votre message ! Je ne suis pas en recherche active actuellement, mais n'hésitez pas à rester en contact.",
-    "spam_en": "Thanks for the message, but I'm not interested. Best of luck!",
-    "spam_fr": "Merci pour le message, mais ce n'est pas pour moi. Bonne continuation !",
+    "recruiter_en": "Hi {name},\n\nThank you for reaching out and thinking of me for this opportunity. I really appreciate you taking the time to connect.\n\nAt the moment, I'm fully committed to my current projects and not actively exploring new roles. However, I'm always happy to stay connected and keep the conversation open for the future.\n\nWishing you all the best in your search!\n\nBest regards,\nMaxime",
+    "recruiter_fr": "Bonjour {name},\n\nMerci d'avoir pris le temps de me contacter, j'apprécie votre démarche.\n\nActuellement, je suis pleinement engagé dans mes projets en cours et ne suis pas en recherche active. Cependant, je reste ouvert aux échanges et serai ravi de rester en contact pour d'éventuelles opportunités futures.\n\nJe vous souhaite beaucoup de succès dans vos recherches.\n\nCordialement,\nMaxime",
+    "spam_en": "Hi {name},\n\nThank you for reaching out. I appreciate the opportunity, but this isn't something I'm interested in pursuing at the moment.\n\nI wish you the best of luck with your project.\n\nBest regards,\nMaxime",
+    "spam_fr": "Bonjour {name},\n\nMerci pour votre message. J'apprécie votre démarche, mais ce n'est malheureusement pas quelque chose qui m'intéresse pour le moment.\n\nJe vous souhaite beaucoup de succès dans votre projet.\n\nCordialement,\nMaxime",
 }
 RESPONSE_TEMPLATES = json.loads(os.environ.get("RESPONSE_TEMPLATES", json.dumps(DEFAULT_TEMPLATES)))
 
