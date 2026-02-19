@@ -228,13 +228,16 @@ def suggest_response(text, sender_name=""):
     lang = detect_language(text)
     is_french = (lang == "fr")
 
+    # Extract first name only (everything before first space)
+    first_name = sender_name.split()[0] if sender_name else ""
+
     if re.search(r"recruit|hiring|position|role|poste|candidat|mission", text, re.I):
         template_key = "recruiter_fr" if is_french else "recruiter_en"
     else:
         template_key = "spam_fr" if is_french else "spam_en"
 
     template = RESPONSE_TEMPLATES.get(template_key, RESPONSE_TEMPLATES.get("spam_en", ""))
-    return template.replace("{name}", sender_name or "")
+    return template.replace("{name}", first_name or "")
 
 
 def check_linkedin_messages(dry_run=False):
