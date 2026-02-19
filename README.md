@@ -30,6 +30,15 @@ python3 scripts/linkedin-spam-filter.py --dry-run --json
 
 > ⚠️ **Security:** Never store MCP tokens or credentials in config files.
 
+## Workflow
+
+1. **Detect** spam via `linkedin-spam-filter.py --json`
+2. **Review** the suggested response
+3. **Send** the response via `scripts/send-response.py --chat-id <ID> --message "<text>"`
+4. **Archive** automatically (done by send-response.py)
+
+⚠️ **Important:** Always archive the chat after sending a response to keep LinkedIn inbox clean.
+
 ## Features
 
 - 🔍 Pattern-based prospection detection (FR + EN)
@@ -38,6 +47,7 @@ python3 scripts/linkedin-spam-filter.py --dry-run --json
 - 🛡️ Human-in-the-loop — never auto-sends
 - 📊 JSON output for automation
 - 🧪 Standalone test mode (`--test-text`)
+- 📥 Auto-archive after response
 
 ## Requirements
 
