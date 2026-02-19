@@ -20,22 +20,46 @@ LOG_FILE = os.environ.get("LINKEDIN_LOG", os.path.expanduser("~/logs/linkedin-sp
 STATE_FILE = os.environ.get("LINKEDIN_STATE", os.path.expanduser("~/.openclaw-linkedin-state.json"))
 
 # Detection patterns (improved for LinkedIn prospection)
-DEFAULT_PATTERNS = (
-    # Recruiting
-    r"opportunity|hiring|position|role|recruit|talent|headhunt|"
-    r"salaire|rémunération|CDI|poste|profil|candidat|mission|"
-    # Business development
-    r"partnership|collaboration|synergy|revenue|growth|scale|explore|"
-    r"quick chat|quick call|would you be open|open to|connect on this|"
-    # Flattery openers (generic)
-    r"I came across your profile|I noticed your experience|I like how you|"
-    r"impressed by your|saw your background|noticed you|"
-    r"je me permets|votre profil|votre parcours|j'ai vu que|"
-    # Sales/pitch keywords
-    r"automation layer|help teams|struggling with|our platform|our solution|"
-    r"we help|we specialize|we work with|our clients|RAG|AI features"
-)
-SPAM_PATTERNS = os.environ.get("SPAM_PATTERNS", DEFAULT_PATTERNS)
+# Cold outreach buzzwords (only suspicious in cold context)
+COLD_OUTREACH_BUZZWORDS = [
+    "synergy", "revenue", "growth", "scale", "explore opportunities",
+    "quick chat", "quick call", "would you be open", "open to", 
+    "connect on this", "hop on a call", "15 minutes",
+    "synergie", "opportunités", "discuter ensemble"
+]
+
+# Generic flattery openers (strong spam signal)
+GENERIC_OPENERS = [
+    "I came across your profile", "I noticed your experience", 
+    "impressed by your", "saw your background", "noticed you",
+    "je me permets", "votre profil", "votre parcours", "j'ai vu que"
+]
+
+# Commercial pitch indicators
+COMMERCIAL_TONE = [
+    "we help", "we specialize", "we work with", "our clients",
+    "our platform", "our solution", "help teams", "struggling with",
+    "nous aidons", "nous proposons", "notre solution", "clé en main"
+]
+
+# Recruiting keywords
+RECRUITING_PATTERNS = [
+    "opportunity", "hiring", "position", "role", "recruit", "talent", "headhunt",
+    "salaire", "rémunération", "CDI", "poste", "profil", "candidat", "mission"
+]
+
+# Technical terms that need context analysis (NOT spam alone)
+TECHNICAL_TERMS = [
+    "RAG", "AI", "ML", "encryption", "architecture", "security",
+    "API", "backend", "frontend", "deployment", "infrastructure"
+]
+
+# Authentic personal tone indicators (reduce spam score)
+AUTHENTIC_MARKERS = [
+    "ton approche", "si ça t'intéresse", "your approach", "if you're interested",
+    "vraiment", "honestly", "personnellement", "personally", "je pense",
+    "I think", "I noticed that", "would love to hear"
+]
 
 # Response templates
 DEFAULT_TEMPLATES = {
@@ -181,13 +205,208 @@ def parse_beeper_response(content_text, tool_name=None):
     return result
 
 
-def detect_prospection(text):
-    """Check if message matches prospection/spam patterns."""
+def is_reply_context(text):
+    """Detect if message appears to be a reply to existing conversation."""
     if not text:
-        return False, []
-    pattern = re.compile(SPAM_PATTERNS, re.IGNORECASE)
-    matches = pattern.findall(text)
-    return len(matches) > 0, matches
+        return False
+    
+    # Reply indicators (explicit references to previous messages)
+    reply_markers = [
+        r"\bthanks for your (message|reply|response)\b",
+        r"\bmerci (pour|de) (ton|votre) (message|réponse)\b",
+        r"\bas you (mentioned|said)\b",
+        r"\bcomme (tu|vous) (l'as|l'avez) (dit|mentionné)\b",
+        r"\bregarding your (question|point|message)\b",
+        r"\bconcernant (votre|ta) (question|remarque)\b",
+        r"\bto answer your\b",
+        r"\bpour répondre\b",
+        r"\bfollowing up on\b",
+        r"\bsuivi de notre\b"
+    ]
+    
+    for marker in reply_markers:
+        if re.search(marker, text, re.I):
+            return True
+    
+    return False
+
+
+def analyze_tone(text):
+    """Analyze if message has authentic/personal tone vs generic/commercial."""
+    if not text:
+        return 0.5
+    
+    text_lower = text.lower()
+    
+    # Count authentic markers
+    authentic_count = sum(1 for marker in AUTHENTIC_MARKERS 
+                         if marker.lower() in text_lower)
+    
+    # Count commercial/generic markers  
+    commercial_count = sum(1 for marker in COMMERCIAL_TONE 
+                          if marker.lower() in text_lower)
+    
+    # Count generic openers
+    generic_opener_count = sum(1 for opener in GENERIC_OPENERS 
+                               if opener.lower() in text_lower)
+    
+    # Scoring: authentic reduces score, commercial increases it
+    # Range: 0 (very authentic) to 1 (very commercial)
+    score = 0.5  # neutral baseline
+    
+    if authentic_count > 0:
+        score -= 0.3 * min(authentic_count, 3)  # cap at -0.9
+    
+    if commercial_count > 0:
+        score += 0.2 * commercial_count
+    
+    if generic_opener_count > 0:
+        score += 0.4  # strong signal
+    
+    return max(0.0, min(1.0, score))
+
+
+def calculate_buzzword_density(text):
+    """Calculate density of technical buzzwords vs substance."""
+    if not text:
+        return 0.0
+    
+    words = text.split()
+    total_words = len(words)
+    
+    if total_words < 10:
+        return 0.0  # too short to judge
+    
+    # Count buzzwords
+    buzzword_count = 0
+    text_lower = text.lower()
+    
+    for term in COLD_OUTREACH_BUZZWORDS + TECHNICAL_TERMS:
+        # Count occurrences (case-insensitive)
+        buzzword_count += text_lower.count(term.lower())
+    
+    # Density = buzzwords per 100 words
+    density = (buzzword_count / total_words) * 100
+    
+    return density
+
+
+def detect_prospection(text, is_conversation_reply=False):
+    """
+    Intelligent spam detection with context analysis.
+    
+    Args:
+        text: Message text to analyze
+        is_conversation_reply: True if this is a reply in an existing thread
+    
+    Returns:
+        (is_spam: bool, details: dict)
+    """
+    if not text:
+        return False, {}
+    
+    text_lower = text.lower()
+    
+    # 1. Check if it's a reply in existing conversation
+    detected_reply = is_reply_context(text)
+    if is_conversation_reply or detected_reply:
+        # Existing conversations get lower scrutiny
+        spam_threshold = 0.8  # very high bar
+    else:
+        spam_threshold = 0.5  # normal threshold
+    
+    # 2. Analyze tone (authentic vs commercial)
+    tone_score = analyze_tone(text)
+    
+    # 3. Calculate buzzword density
+    buzzword_density = calculate_buzzword_density(text)
+    
+    # 4. Check for recruiting patterns (always flag)
+    recruiting_matches = [term for term in RECRUITING_PATTERNS 
+                         if term.lower() in text_lower]
+    
+    # 5. Check for generic openers (strong spam signal)
+    generic_openers = [opener for opener in GENERIC_OPENERS 
+                       if opener.lower() in text_lower]
+    
+    # 6. Check for commercial pitch patterns
+    commercial_matches = [term for term in COMMERCIAL_TONE 
+                         if term.lower() in text_lower]
+    
+    # 7. Cold outreach buzzwords
+    cold_outreach_matches = [term for term in COLD_OUTREACH_BUZZWORDS 
+                            if term.lower() in text_lower]
+    
+    # 8. Technical terms (only spam if high density + commercial tone)
+    technical_matches = [term for term in TECHNICAL_TERMS 
+                        if term.lower() in text_lower]
+    
+    # Calculate final spam score
+    spam_score = 0.0
+    reasons = []
+    
+    # Recruiting = instant high score
+    if recruiting_matches:
+        spam_score += 0.6
+        reasons.append(f"recruiting keywords: {', '.join(recruiting_matches[:3])}")
+    
+    # Generic openers = strong signal
+    if generic_openers:
+        spam_score += 0.4
+        reasons.append(f"generic opener: {generic_openers[0]}")
+    
+    # Commercial tone
+    if tone_score > 0.7:
+        spam_score += tone_score * 0.3
+        reasons.append(f"commercial tone (score: {tone_score:.2f})")
+    
+    # Commercial pitch patterns (1 = moderate, 2+ = strong)
+    if len(commercial_matches) >= 2:
+        spam_score += 0.4
+        reasons.append(f"commercial pitch: {', '.join(commercial_matches[:2])}")
+    elif len(commercial_matches) == 1:
+        spam_score += 0.2
+        reasons.append(f"commercial keyword: {commercial_matches[0]}")
+    
+    # Cold outreach buzzwords (2+ = likely spam)
+    if len(cold_outreach_matches) >= 2:
+        spam_score += 0.3
+        reasons.append(f"cold outreach: {', '.join(cold_outreach_matches[:2])}")
+    
+    # High buzzword density (3+ in short message or >10 per 100 words)
+    if buzzword_density > 10 or (len(text.split()) < 50 and len(technical_matches) >= 3):
+        spam_score += 0.3
+        reasons.append(f"high buzzword density ({buzzword_density:.1f}%)")
+    
+    # Reduce score for authentic tone
+    if tone_score < 0.3:
+        spam_score -= 0.2
+        reasons.append(f"authentic tone (score: {tone_score:.2f})")
+    
+    # Technical terms alone (1-2 in context) are NOT spam
+    if technical_matches and len(technical_matches) <= 2 and tone_score < 0.5:
+        # Valid technical discussion
+        spam_score -= 0.1
+    
+    # Decision
+    is_spam = spam_score >= spam_threshold
+    
+    details = {
+        "spam_score": round(spam_score, 2),
+        "threshold": spam_threshold,
+        "tone_score": round(tone_score, 2),
+        "buzzword_density": round(buzzword_density, 1),
+        "is_reply": detected_reply or is_conversation_reply,
+        "reasons": reasons,
+        "matches": {
+            "recruiting": recruiting_matches[:3],
+            "commercial": commercial_matches[:3],
+            "technical": technical_matches[:3],
+            "generic_openers": generic_openers[:2]
+        }
+    }
+    
+    return is_spam, details
 
 
 def detect_language(text):
@@ -223,7 +442,7 @@ def detect_language(text):
         return "en"
 
 
-def suggest_response(text, sender_name=""):
+def suggest_response(text, sender_name="", detection_details=None):
     """Generate a suggested response based on message content and language."""
     lang = detect_language(text)
     is_french = (lang == "fr")
@@ -231,7 +450,16 @@ def suggest_response(text, sender_name=""):
     # Extract first name only (everything before first space)
     first_name = sender_name.split()[0] if sender_name else ""
 
-    if re.search(r"recruit|hiring|position|role|poste|candidat|mission", text, re.I):
+    # Use detection details if available
+    is_recruiting = False
+    if detection_details and "matches" in detection_details:
+        recruiting_matches = detection_details["matches"].get("recruiting", [])
+        is_recruiting = len(recruiting_matches) > 0
+    else:
+        # Fallback to regex check
+        is_recruiting = bool(re.search(r"recruit|hiring|position|role|poste|candidat|mission", text, re.I))
+
+    if is_recruiting:
         template_key = "recruiter_fr" if is_french else "recruiter_en"
     else:
         template_key = "spam_fr" if is_french else "spam_en"
@@ -278,8 +506,12 @@ def check_linkedin_messages(dry_run=False):
             continue
 
         messages = msgs_result.get("messages", [])
+        
+        # Count messages in this thread to determine if it's an ongoing conversation
+        total_messages = len(messages)
+        is_ongoing_conversation = total_messages > 2  # More than just initial exchange
 
-        for msg in messages:
+        for idx, msg in enumerate(messages):
             msg_id = msg.get("messageID", "")
             if msg_id in seen:
                 continue
@@ -292,23 +524,27 @@ def check_linkedin_messages(dry_run=False):
             if msg.get("isOwnMessage", False):
                 seen.add(msg_id)
                 continue
+            
+            # Check if this is a reply (not the first message from sender)
+            is_reply = idx > 0 or is_ongoing_conversation
 
-            is_spam, matches = detect_prospection(text)
+            # Detect spam with context
+            is_spam, details = detect_prospection(text, is_conversation_reply=is_reply)
 
             if is_spam:
-                suggestion = suggest_response(text, sender)
+                suggestion = suggest_response(text, sender, details)
                 result = {
                     "chat_id": chat_id,
                     "sender": sender,
                     "message_id": msg_id,
                     "text_preview": text[:200],
                     "text_full": text,  # Full message for review
-                    "matches": matches[:5],
+                    "detection_details": details,
                     "suggested_response": suggestion,
                     "status": "pending_confirmation",
                 }
                 results.append(result)
-                log.info(f"Prospection detected from {sender}: {matches[:3]}")
+                log.info(f"Prospection detected from {sender} (score: {details['spam_score']}, reasons: {', '.join(details['reasons'][:2])})")
 
             seen.add(msg_id)
 
@@ -337,21 +573,28 @@ def main():
 
     # Test mode
     if args.test_text:
-        is_spam, matches = detect_prospection(args.test_text)
-        suggestion = suggest_response(args.test_text) if is_spam else None
+        is_spam, details = detect_prospection(args.test_text)
+        suggestion = suggest_response(args.test_text, detection_details=details) if is_spam else None
         result = {
             "is_prospection": is_spam,
-            "matches": matches,
+            "detection_details": details,
             "suggested_response": suggestion,
         }
         if args.json:
-            print(json.dumps(result, ensure_ascii=False))
+            print(json.dumps(result, ensure_ascii=False, indent=2))
         else:
             if is_spam:
-                print(f"🎯 Prospection detected! Matches: {', '.join(matches[:5])}")
-                print(f"💬 Suggested response: {suggestion}")
+                print(f"🎯 Prospection detected!")
+                print(f"   Spam score: {details['spam_score']:.2f} (threshold: {details['threshold']})")
+                print(f"   Tone score: {details['tone_score']:.2f} (0=authentic, 1=commercial)")
+                print(f"   Buzzword density: {details['buzzword_density']:.1f}%")
+                print(f"   Reasons: {', '.join(details['reasons'])}")
+                if suggestion:
+                    print(f"\n💬 Suggested response:\n{suggestion}")
             else:
                 print("✅ Not detected as prospection")
+                print(f"   Spam score: {details['spam_score']:.2f} (threshold: {details['threshold']})")
+                print(f"   Reasons: {', '.join(details['reasons']) if details['reasons'] else 'No spam indicators'}")
         return
 
     # Normal mode
