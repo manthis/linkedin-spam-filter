@@ -190,9 +190,43 @@ def detect_prospection(text):
     return len(matches) > 0, matches
 
 
+def detect_language(text):
+    """Detect if message is in French or English based on content."""
+    if not text:
+        return "en"
+    
+    # Check for French accents
+    has_accents = bool(re.search(r"[éèêëàâäùûüôöîïç]", text))
+    
+    # Check for common French words/phrases
+    french_markers = [
+        r"\bbonjour\b", r"\bmerci\b", r"\bvous\b", r"\bvotre\b", 
+        r"\bje\b", r"\bsuis\b", r"\bpour\b", r"\bavez\b",
+        r"\bparcours\b", r"\bprofil\b", r"\bposte\b", r"\brecherche\b"
+    ]
+    french_count = sum(1 for marker in french_markers if re.search(marker, text, re.I))
+    
+    # Check for common English words
+    english_markers = [
+        r"\bhope\b", r"\byou\b", r"\byour\b", r"\bwould\b",
+        r"\bcould\b", r"\btouch\b", r"\bteam\b", r"\blooking\b"
+    ]
+    english_count = sum(1 for marker in english_markers if re.search(marker, text, re.I))
+    
+    # Decide based on markers
+    if has_accents or french_count >= 2:
+        return "fr"
+    elif english_count >= 2:
+        return "en"
+    else:
+        # Default to English if uncertain
+        return "en"
+
+
 def suggest_response(text, sender_name=""):
-    """Generate a suggested response based on message content."""
-    is_french = bool(re.search(r"[éèêëàâäùûüôöîïç]|bonjour|merci|profil", text, re.I))
+    """Generate a suggested response based on message content and language."""
+    lang = detect_language(text)
+    is_french = (lang == "fr")
 
     if re.search(r"recruit|hiring|position|role|poste|candidat|mission", text, re.I):
         template_key = "recruiter_fr" if is_french else "recruiter_en"
