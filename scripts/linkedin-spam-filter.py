@@ -1,45 +1,50 @@
 #!/usr/bin/env python3
 """
-linkedin-prospection.py — Detect LinkedIn spam/prospection messages via Beeper MCP.
-Generates suggested responses and supports confirmation workflow.
-Pure stdlib (except MCP interaction via mcporter CLI).
+linkedin-spam-filter.py — Detect LinkedIn spam/prospection messages via Beeper MCP.
+Direct MCP HTTP client (no mcporter CLI).
 """
 
 import json
 import os
 import re
-import subprocess
-import sys
-import argparse
 import logging
 from datetime import datetime
 from pathlib import Path
+import urllib.request
+import urllib.error
 
 # --- Config from env ---
-MCPORTER_CMD = os.environ.get("MCPORTER_CMD", "mcporter")
-BEEPER_SERVER = os.environ.get("BEEPER_SERVER", "beeper")
-LINKEDIN_ROOM_PATTERN = os.environ.get("LINKEDIN_ROOM_PATTERN", "linkedin")
-LOG_FILE = os.environ.get("LINKEDIN_LOG", os.path.expanduser("~/logs/linkedin-prospection.log"))
+BEEPER_MCP_URL = os.environ.get("BEEPER_MCP_URL", "http://localhost:23373/v0/mcp")
+BEEPER_TOKEN = os.environ.get("BEEPER_TOKEN", "d3970894-6957-4599-83df-6bf7899f4fb3")
+LOG_FILE = os.environ.get("LINKEDIN_LOG", os.path.expanduser("~/logs/linkedin-spam-filter.log"))
 STATE_FILE = os.environ.get("LINKEDIN_STATE", os.path.expanduser("~/.openclaw-linkedin-state.json"))
 
-# Detection patterns (comma-separated regexes)
+# Detection patterns (improved for LinkedIn prospection)
 DEFAULT_PATTERNS = (
+    # Recruiting
     r"opportunity|hiring|position|role|recruit|talent|headhunt|"
     r"salaire|rémunération|CDI|poste|profil|candidat|mission|"
-    r"partnership|collaboration|revenue|growth|scale|"
-    r"I came across your profile|I noticed your experience|"
-    r"je me permets|votre profil|votre parcours"
+    # Business development
+    r"partnership|collaboration|synergy|revenue|growth|scale|explore|"
+    r"quick chat|quick call|would you be open|open to|connect on this|"
+    # Flattery openers (generic)
+    r"I came across your profile|I noticed your experience|I like how you|"
+    r"impressed by your|saw your background|noticed you|"
+    r"je me permets|votre profil|votre parcours|j'ai vu que|"
+    # Sales/pitch keywords
+    r"automation layer|help teams|struggling with|our platform|our solution|"
+    r"we help|we specialize|we work with|our clients|RAG|AI features"
 )
 SPAM_PATTERNS = os.environ.get("SPAM_PATTERNS", DEFAULT_PATTERNS)
 
 # Response templates
-DEFAULT_TEMPLATES = json.dumps({
+DEFAULT_TEMPLATES = {
     "recruiter_en": "Hi {name}, thanks for reaching out! I'm not actively looking for new opportunities at the moment, but feel free to connect — I'm always open to interesting conversations.",
     "recruiter_fr": "Bonjour {name}, merci pour votre message ! Je ne suis pas en recherche active actuellement, mais n'hésitez pas à rester en contact.",
     "spam_en": "Thanks for the message, but I'm not interested. Best of luck!",
     "spam_fr": "Merci pour le message, mais ce n'est pas pour moi. Bonne continuation !",
-})
-RESPONSE_TEMPLATES = json.loads(os.environ.get("RESPONSE_TEMPLATES", DEFAULT_TEMPLATES))
+}
+RESPONSE_TEMPLATES = json.loads(os.environ.get("RESPONSE_TEMPLATES", json.dumps(DEFAULT_TEMPLATES)))
 
 # Setup logging
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
@@ -64,18 +69,122 @@ def save_state(state):
         json.dump(state, f, indent=2, ensure_ascii=False)
 
 
-def run_mcporter(args):
-    """Run mcporter command and return output."""
-    cmd = [MCPORTER_CMD] + args
+def mcp_call(tool_name, arguments):
+    """Call a Beeper MCP tool via HTTP JSON-RPC (SSE format)."""
+    request_data = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": tool_name,
+            "arguments": arguments
+        }
+    }
+    
+    headers = {
+        "Authorization": f"Bearer {BEEPER_TOKEN}",
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream"
+    }
+    
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        return result.stdout.strip(), result.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        return str(e), False
+        req = urllib.request.Request(
+            BEEPER_MCP_URL,
+            data=json.dumps(request_data).encode('utf-8'),
+            headers=headers,
+            method='POST'
+        )
+        
+        with urllib.request.urlopen(req, timeout=30) as response:
+            raw_response = response.read().decode('utf-8')
+            
+            # Parse SSE format: "event: message\ndata: {json}\n\n"
+            for line in raw_response.strip().split('\n'):
+                if line.startswith('data: '):
+                    json_str = line[6:]  # Remove "data: " prefix
+                    result = json.loads(json_str)
+                    
+                    if "error" in result:
+                        log.error(f"MCP error: {result['error']}")
+                        return None
+                    
+                    # Extract content from MCP response
+                    if "result" in result and "content" in result["result"]:
+                        content = result["result"]["content"]
+                        # MCP returns list of content blocks
+                        if isinstance(content, list) and len(content) > 0:
+                            first_block = content[0]
+                            if first_block.get("type") == "text":
+                                # Parse response (JSON or markdown)
+                                return parse_beeper_response(first_block.get("text", ""), tool_name)
+                    
+                    return result.get("result")
+            
+            return None
+            
+    except urllib.error.HTTPError as e:
+        log.error(f"HTTP error calling {tool_name}: {e.code} {e.reason}")
+        return None
+    except Exception as e:
+        log.error(f"Error calling {tool_name}: {e}")
+        return None
+
+
+def parse_beeper_response(content_text, tool_name=None):
+    """Parse Beeper's response (markdown or JSON)."""
+    result = {
+        "chats": [],
+        "messages": []
+    }
+    
+    # Try to parse as JSON first
+    try:
+        data = json.loads(content_text)
+        
+        # Handle list_messages JSON response
+        if "items" in data:
+            for item in data.get("items", []):
+                result["messages"].append({
+                    "messageID": item.get("id"),
+                    "text": item.get("text", ""),
+                    "sender": {"displayName": item.get("senderName", "")},
+                    "isOwnMessage": item.get("isSender", False),
+                    "timestamp": item.get("timestamp"),
+                    "isUnread": item.get("isUnread", False)
+                })
+            return result
+        
+        # Handle other JSON formats
+        if "chats" in data:
+            result["chats"] = data["chats"]
+        if "messages" in data:
+            result["messages"] = data["messages"]
+        
+        return result
+        
+    except json.JSONDecodeError:
+        # Fall back to markdown parsing
+        pass
+    
+    # Markdown parsing
+    if tool_name == "search_chats":
+        # Parse chat entries: "## Name (chatID: !xxx:beeper.local)"
+        chat_pattern = r'##\s+([^\(]+)\s+\(chatID:\s+([^\)]+)\)'
+        for match in re.finditer(chat_pattern, content_text):
+            name = match.group(1).strip()
+            chat_id = match.group(2).strip()
+            result["chats"].append({
+                "chatID": chat_id,
+                "title": name
+            })
+    
+    return result
 
 
 def detect_prospection(text):
     """Check if message matches prospection/spam patterns."""
+    if not text:
+        return False, []
     pattern = re.compile(SPAM_PATTERNS, re.IGNORECASE)
     matches = pattern.findall(text)
     return len(matches) > 0, matches
@@ -96,58 +205,63 @@ def suggest_response(text, sender_name=""):
 
 def check_linkedin_messages(dry_run=False):
     """Check for new LinkedIn messages via Beeper MCP."""
-    # This attempts to use mcporter to interact with Beeper
-    # The actual implementation depends on the Beeper MCP API
-    output, ok = run_mcporter(["call", BEEPER_SERVER, "list_rooms"])
+    # Search for unread LinkedIn chats
+    search_result = mcp_call("search_chats", {
+        "query": "LinkedIn",
+        "limit": 50,
+        "unreadOnly": True
+    })
 
-    if not ok:
-        return {"status": "error", "error": f"mcporter failed: {output}"}
+    if not search_result:
+        return {"status": "error", "error": "Failed to search chats"}
 
-    try:
-        rooms = json.loads(output) if output else []
-    except json.JSONDecodeError:
-        return {"status": "error", "error": f"Invalid JSON from mcporter: {output[:200]}"}
+    # Extract chat IDs from parsed result
+    chats = search_result.get("chats", [])
+    
+    if not chats:
+        return {
+            "status": "ok",
+            "detected": 0,
+            "messages": []
+        }
 
     state = load_state()
     seen = set(state.get("seen_messages", []))
     results = []
 
-    for room in rooms:
-        room_name = room.get("name", "")
-        room_id = room.get("id", "")
-
-        # Filter LinkedIn rooms
-        if LINKEDIN_ROOM_PATTERN.lower() not in room_name.lower():
+    for chat in chats:
+        chat_id = chat.get("chatID", "")
+        if not chat_id:
             continue
 
-        # Get recent messages
-        msgs_output, msgs_ok = run_mcporter([
-            "call", BEEPER_SERVER, "get_messages",
-            "--room", room_id, "--limit", "5"
-        ])
-
-        if not msgs_ok:
+        # Get messages from this chat
+        msgs_result = mcp_call("list_messages", {"chatID": chat_id})
+        
+        if not msgs_result:
             continue
 
-        try:
-            messages = json.loads(msgs_output) if msgs_output else []
-        except json.JSONDecodeError:
-            continue
+        messages = msgs_result.get("messages", [])
 
         for msg in messages:
-            msg_id = msg.get("id", "")
+            msg_id = msg.get("messageID", "")
             if msg_id in seen:
                 continue
 
-            text = msg.get("body", "")
-            sender = msg.get("sender", "")
+            text = msg.get("text", "")
+            sender_info = msg.get("sender", {})
+            sender = sender_info.get("displayName", "") if isinstance(sender_info, dict) else str(sender_info)
+            
+            # Skip my own messages
+            if msg.get("isOwnMessage", False):
+                seen.add(msg_id)
+                continue
+
             is_spam, matches = detect_prospection(text)
 
             if is_spam:
                 suggestion = suggest_response(text, sender)
                 result = {
-                    "room": room_name,
-                    "room_id": room_id,
+                    "chat_id": chat_id,
                     "sender": sender,
                     "message_id": msg_id,
                     "text_preview": text[:200],
@@ -175,8 +289,10 @@ def check_linkedin_messages(dry_run=False):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="LinkedIn prospection detector")
-    parser.add_argument("--dry-run", action="store_true", help="Don't update state or send")
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="LinkedIn spam filter via Beeper MCP")
+    parser.add_argument("--dry-run", action="store_true", help="Don't update state")
     parser.add_argument("--json", action="store_true", help="JSON output")
     parser.add_argument("--test-text", type=str, help="Test detection on provided text")
     args = parser.parse_args()
