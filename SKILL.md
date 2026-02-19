@@ -1,15 +1,15 @@
-# openclaw-skill-linkedin-prospection
+# openclaw-skill-linkedin-spam-filter
 
-Detect LinkedIn prospection/spam messages via Beeper MCP. Generates suggested responses with confirmation workflow.
+Detect LinkedIn spam/prospection messages via Beeper MCP. Generates suggested responses with confirmation workflow.
 
 ## Usage
 
 ```bash
 # Check LinkedIn messages
-python3 scripts/linkedin-prospection.py [--dry-run] [--json]
+python3 scripts/linkedin-spam-filter.py [--dry-run] [--json]
 
 # Test detection on text
-python3 scripts/linkedin-prospection.py --test-text "Hi, I have an exciting opportunity..."
+python3 scripts/linkedin-spam-filter.py --test-text "Hi, I have an exciting opportunity..."
 ```
 
 ## Configuration (env vars)
@@ -22,7 +22,7 @@ python3 scripts/linkedin-prospection.py --test-text "Hi, I have an exciting oppo
 | `SPAM_PATTERNS` | | (built-in) | Regex patterns for detection |
 | `RESPONSE_TEMPLATES` | | (built-in) | JSON templates for responses |
 | `LINKEDIN_STATE` | | `~/.openclaw-linkedin-state.json` | State file |
-| `LINKEDIN_LOG` | | `~/logs/linkedin-prospection.log` | Log file |
+| `LINKEDIN_LOG` | | `~/logs/linkedin-spam-filter.log` | Log file |
 
 ## Workflow
 
@@ -41,7 +41,7 @@ python3 scripts/linkedin-prospection.py --test-text "Hi, I have an exciting oppo
 
 ```yaml
 cron:
-  - name: "LinkedIn Check"
+  - name: "LinkedIn Spam Filter"
     schedule: "0 */6 * * *"
-    command: "python3 scripts/linkedin-prospection.py --json"
+    command: "python3 scripts/linkedin-spam-filter.py --json"
 ```
