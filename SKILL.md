@@ -1,3 +1,10 @@
+---
+name: beeper-linkedin
+description: "Detect and filter LinkedIn spam/prospection messages via Beeper MCP. Scans LinkedIn DMs, analyzes patterns, suggests responses with confirmation workflow. Use when asked to filter LinkedIn messages, detect prospection, or manage LinkedIn DMs via Beeper."
+homepage: https://github.com/manthis/linkedin-spam-filter
+metadata: { "openclaw": { "emoji": "💼", "requires": { "bins": ["mcporter", "python3"] } } }
+---
+
 # openclaw-skill-linkedin-spam-filter
 
 Detect LinkedIn spam/prospection messages via Beeper MCP. Generates suggested responses with confirmation workflow.
