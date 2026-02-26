@@ -85,6 +85,8 @@ def main():
     parser.add_argument("--message", required=True, help="Message text to send")
     parser.add_argument("--dry-run", action="store_true", help="Don't actually send")
     args = parser.parse_args()
+    # Interpret escaped newlines from bash (\\n -> actual newline)
+    args.message = args.message.replace('\\n', '\n')
     
     if args.dry_run:
         print(f"[DRY RUN] Would send to {args.chat_id}:")
