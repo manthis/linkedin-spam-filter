@@ -2,7 +2,7 @@
 """LinkedIn message fetcher via Beeper MCP.
 Fetches unseen LinkedIn messages and returns them for AI judgment.
 """
-import json, os, urllib.request, urllib.error, logging, argparse
+import json, os, re, urllib.request, logging, argparse
 from pathlib import Path
 
 BEEPER_MCP_URL = os.environ.get("BEEPER_MCP_URL", "http://localhost:23373/v0/mcp")
@@ -14,6 +14,10 @@ Path(LOG_FILE).parent.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s")
 log = logging.getLogger()
 
+
+# ---------------------------------------------------------------------------
+# State
+# ---------------------------------------------------------------------------
 
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -27,14 +31,22 @@ def save_state(state):
         json.dump(state, f, indent=2, ensure_ascii=False)
 
 
+# ---------------------------------------------------------------------------
+# Beeper MCP
+# ---------------------------------------------------------------------------
+
 def mcp_call(tool_name, params):
-    payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                          "params": {"name": tool_name, "arguments": params}}).encode()
+    payload = json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": tool_name, "arguments": params}
+    }).encode()
     req = urllib.request.Request(
         BEEPER_MCP_URL, data=payload,
-        headers={"Content-Type": "application/json",
-                 "Accept": "application/json, text/event-stream",
-                 "Authorization": f"Bearer {BEEPER_TOKEN}"})
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "Authorization": f"Bearer {BEEPER_TOKEN}",
+        })
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             raw = resp.read().decode()
@@ -45,43 +57,47 @@ def mcp_call(tool_name, params):
                     log.error(f"MCP error {tool_name}: {d['error']}")
                     return None
                 text = d.get("result", {}).get("content", [{}])[0].get("text", "")
-                return parse_response(text, tool_name)
+                return _parse(text)
     except Exception as e:
         log.error(f"MCP {tool_name} failed: {e}")
     return None
 
 
-def parse_response(text, tool_name=None):
+def _parse(text):
+    """Parse MCP response text: JSON object or markdown chat list."""
     try:
         data = json.loads(text)
+        # list_messages returns {items: [...]}
         if "items" in data:
             return {"messages": [{
-                "messageID": i.get("id"),
-                "text": i.get("text", ""),
-                "sender": i.get("senderName", ""),
+                "messageID":   i.get("id"),
+                "text":        i.get("text", ""),
+                "sender":      i.get("senderName", ""),
                 "isOwnMessage": i.get("isSender", False),
-                "timestamp": i.get("timestamp"),
-                "isUnread": i.get("isUnread", False),
+                "timestamp":   i.get("timestamp"),
             } for i in data["items"]]}
         return data
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, TypeError):
         pass
-    # Parse markdown chat list
-    import re
+    # search_chats returns markdown: ## Name (chatID: ...)
     chats = []
     for m in re.finditer(r"## (.+?) \(chatID: ([^)]+)\)", text):
         chats.append({"title": m.group(1).strip(), "chatID": m.group(2).strip()})
     return {"chats": chats}
 
 
+# ---------------------------------------------------------------------------
+# Core logic
+# ---------------------------------------------------------------------------
+
 def fetch_messages(dry_run=False):
-    """Fetch all unseen LinkedIn messages from single chats."""
+    """Fetch all new unseen LinkedIn messages. Pending messages are re-returned until confirmed."""
     state = load_state()
-    seen = set(state.get("seen_messages", []))
+    seen        = set(state.get("seen_messages", []))
     pending_ids = {m.get("message_id") for m in state.get("pending_responses", [])}
 
     result = mcp_call("search_chats", {"query": "LinkedIn", "limit": 50, "unreadOnly": False})
-    chats = result.get("chats", []) if result else []
+    chats = (result or {}).get("chats", [])
 
     new_messages = []
     for chat in chats:
@@ -91,81 +107,86 @@ def fetch_messages(dry_run=False):
         msgs_result = mcp_call("list_messages", {"chatID": chat_id})
         if not msgs_result:
             continue
-        messages = msgs_result.get("messages", [])
-        for msg in messages:
+        for msg in msgs_result.get("messages", []):
             mid = msg.get("messageID", "")
-            if not mid or mid in seen or msg.get("isOwnMessage", True):
-                if not msg.get("isOwnMessage", True) and mid not in seen and mid not in pending_ids:
-                    pass
-                elif mid not in seen and not msg.get("isOwnMessage", True) and mid not in pending_ids:
-                    pass
-                else:
-                    if not msg.get("isOwnMessage", False):
-                        pass
-                    continue
+            if not mid:
+                continue
             if msg.get("isOwnMessage", False):
+                # Own messages: mark seen so we don't re-process
                 seen.add(mid)
                 continue
-            # New message from other person — not yet seen or pending
             if mid in seen or mid in pending_ids:
+                # Already handled or already pending
                 continue
             new_messages.append({
-                "chat_id": chat_id,
-                "sender": msg.get("sender", ""),
+                "chat_id":   chat_id,
+                "sender":    msg.get("sender", ""),
                 "message_id": mid,
-                "text": msg.get("text", ""),
+                "text":      msg.get("text", ""),
                 "timestamp": msg.get("timestamp", ""),
-                "status": "pending_confirmation",
+                "status":    "pending_confirmation",
             })
             log.info(f"New message from {msg.get('sender', '?')} (id={mid})")
 
-    if not dry_run and new_messages:
-        state["pending_responses"] = state.get("pending_responses", []) + new_messages
+    if not dry_run:
+        state["seen_messages"] = list(seen)[-2000:]
+        if new_messages:
+            state["pending_responses"] = state.get("pending_responses", []) + new_messages
         save_state(state)
 
-    # Return new messages + existing pending (not yet confirmed)
+    # Return existing pending + newly found (deduplicated)
     all_pending = state.get("pending_responses", []) + new_messages
-    # Deduplicate
-    seen_ids = set()
-    deduplicated = []
+    seen_ids, deduplicated = set(), []
     for m in all_pending:
         if m.get("message_id") not in seen_ids:
-            seen_ids.add(m.get("message_id"))
+            seen_ids.add(m["message_id"])
             deduplicated.append(m)
 
     return {"status": "ok", "detected": len(deduplicated), "messages": deduplicated}
 
 
+def send_reply(chat_id, message):
+    """Send a reply and mark the chat's pending message as confirmed."""
+    mcp_call("send_message", {"chatID": chat_id, "text": message})
+    state = load_state()
+    for m in state.get("pending_responses", []):
+        if m.get("chat_id") == chat_id:
+            mid = m.get("message_id")
+            if mid and mid not in state["seen_messages"]:
+                state["seen_messages"].append(mid)
+    state["pending_responses"] = [m for m in state.get("pending_responses", []) if m.get("chat_id") != chat_id]
+    save_state(state)
+
+
+def ignore_message(message_id):
+    """Dismiss a message without reply."""
+    state = load_state()
+    if message_id not in state["seen_messages"]:
+        state["seen_messages"].append(message_id)
+    state["pending_responses"] = [m for m in state.get("pending_responses", []) if m.get("message_id") != message_id]
+    save_state(state)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
 def main():
     parser = argparse.ArgumentParser(description="LinkedIn message fetcher via Beeper MCP")
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--json", action="store_true")
-    parser.add_argument("--reply-to", type=str, help="Chat ID to reply to")
-    parser.add_argument("--message", type=str, help="Message to send")
-    parser.add_argument("--ignore", type=str, help="Message ID to dismiss without reply")
+    parser.add_argument("--dry-run",  action="store_true",  help="Don't update state")
+    parser.add_argument("--json",     action="store_true",  help="JSON output")
+    parser.add_argument("--reply-to", type=str, metavar="CHAT_ID", help="Chat ID to reply to")
+    parser.add_argument("--message",  type=str, help="Message to send (use with --reply-to)")
+    parser.add_argument("--ignore",   type=str, metavar="MSG_ID",  help="Message ID to dismiss without reply")
     args = parser.parse_args()
 
-    # --ignore: dismiss without reply
     if args.ignore:
-        state = load_state()
-        if args.ignore not in state["seen_messages"]:
-            state["seen_messages"].append(args.ignore)
-        state["pending_responses"] = [m for m in state.get("pending_responses", []) if m.get("message_id") != args.ignore]
-        save_state(state)
+        ignore_message(args.ignore)
         print("ignored")
         return
 
-    # --reply-to: send and confirm
     if args.reply_to and args.message:
-        mcp_call("send_message", {"chatID": args.reply_to, "text": args.message})
-        state = load_state()
-        for m in state.get("pending_responses", []):
-            if m.get("chat_id") == args.reply_to:
-                mid = m.get("message_id")
-                if mid and mid not in state["seen_messages"]:
-                    state["seen_messages"].append(mid)
-        state["pending_responses"] = [m for m in state.get("pending_responses", []) if m.get("chat_id") != args.reply_to]
-        save_state(state)
+        send_reply(args.reply_to, args.message)
         print("sent")
         return
 
