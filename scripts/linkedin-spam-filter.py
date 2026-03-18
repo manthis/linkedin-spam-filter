@@ -157,7 +157,7 @@ def main():
 
     # --reply-to: send and confirm
     if args.reply_to and args.message:
-        mcp_call("send_message", {"chatId": args.reply_to, "text": args.message})
+        mcp_call("send_message", {"chatID": args.reply_to, "text": args.message})
         state = load_state()
         for m in state.get("pending_responses", []):
             if m.get("chat_id") == args.reply_to:
