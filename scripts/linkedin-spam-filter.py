@@ -36,7 +36,10 @@ GENERIC_OPENERS = [
 COMMERCIAL_TONE = [
     "we help", "we specialize", "we work with", "our clients",
     "our platform", "our solution", "help teams", "struggling with",
-    "nous aidons", "nous proposons", "notre solution", "clé en main"
+    "nous aidons", "nous proposons", "notre solution", "clé en main",
+    "we can support", "our developers", "dedicated developer", "fixed-rate",
+    "hourly support", "/hr", "per hour", "our team can", "technical requirements",
+    "portfolio", "client reviews", "company website"
 ]
 
 RECRUITING_PATTERNS = [
@@ -272,7 +275,17 @@ def detect_prospection(text, is_conversation_reply=False):
         reasons.append(f"authentic tone (score: {tone_score:.2f})")
     if technical_matches and len(technical_matches) <= 2 and tone_score < 0.5:
         spam_score -= 0.1
-    is_spam = spam_score >= spam_threshold
+    # Hard spam signals — bypass conversation threshold
+    hard_spam_signals = [
+        r"/hr", r"per hour", r"company website", r"company portfolio",
+        r"client reviews", r"samcom", r"rates start from", r"dedicated developer",
+        r"hourly support", r"fixed-rate project"
+    ]
+    is_hard_spam = any(sig.lower() in text_lower for sig in hard_spam_signals) and spam_score >= 0.5
+    is_spam = spam_score >= spam_threshold or is_hard_spam
+    if is_hard_spam and not (spam_score >= spam_threshold):
+        reasons.append("hard spam signal detected")
+        spam_score = max(spam_score, 0.75)
     details = {
         "spam_score": round(spam_score, 2),
         "threshold": spam_threshold,
@@ -325,7 +338,9 @@ def categorize_message(text, detection_details=None):
     outsourcing_keywords = [
         "outsourc", "staff augment", "team augment", "body shop",
         "external partner", "partenaire externe", "externalisation",
-        "delivery cost", "offshore", "nearshore", "managed service"
+        "delivery cost", "offshore", "nearshore", "managed service",
+        "dedicated developer", "fixed-rate", "/hr", "per hour",
+        "our developers", "we can support your", "technical support"
     ]
     if any(kw in text_lower for kw in outsourcing_keywords):
         return "outsourcing"
@@ -391,7 +406,7 @@ def check_linkedin_messages(dry_run=False):
         if not msgs_result:
             continue
         messages = msgs_result.get("messages", [])
-        is_ongoing_conversation = len(messages) > 2
+        is_ongoing_conversation = len(messages) > 2 and any(m.get("isOwnMessage", False) for m in messages)
         for idx, msg in enumerate(messages):
             msg_id = msg.get("messageID", "")
             if msg_id in seen:
@@ -419,11 +434,16 @@ def check_linkedin_messages(dry_run=False):
                 }
                 results.append(result)
                 log.info(f"Prospection detected from {sender} (category: {category}, score: {details['spam_score']})")
-            seen.add(msg_id)
+                # Do NOT add spam to seen — keep re-reporting until user confirms action
+            else:
+                seen.add(msg_id)
     if not dry_run:
         state["seen_messages"] = list(seen)[-1000:]
         if results:
-            state["pending_responses"] = state.get("pending_responses", []) + results
+            # Avoid duplicates in pending
+            existing_ids = {m.get("message_id") for m in state.get("pending_responses", [])}
+            new_pending = [r for r in results if r["message_id"] not in existing_ids]
+            state["pending_responses"] = state.get("pending_responses", []) + new_pending
         save_state(state)
     return {"status": "ok", "detected": len(results), "messages": results}
 
@@ -434,7 +454,35 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Don't update state")
     parser.add_argument("--json", action="store_true", help="JSON output")
     parser.add_argument("--test-text", type=str, help="Test detection on provided text")
+    parser.add_argument("--reply-to", type=str, help="Chat ID to reply to")
+    parser.add_argument("--message", type=str, help="Message to send")
+    parser.add_argument("--ignore", type=str, help="Message ID to mark as ignored (dismiss without reply)")
     args = parser.parse_args()
+
+    # Handle --ignore: mark message as seen/dismissed
+    if args.ignore:
+        state = load_state()
+        if args.ignore not in state["seen_messages"]:
+            state["seen_messages"].append(args.ignore)
+        state["pending_responses"] = [m for m in state.get("pending_responses", []) if m.get("message_id") != args.ignore]
+        save_state(state)
+        print("ignored")
+        return
+
+    # Handle --reply-to: send message and mark as confirmed
+    if args.reply_to and args.message:
+        send_result = mcp_call("send_message", {"chatId": args.reply_to, "text": args.message})
+        state = load_state()
+        # Find and remove from pending, add to seen
+        for pending in state.get("pending_responses", []):
+            if pending.get("chat_id") == args.reply_to:
+                mid = pending.get("message_id")
+                if mid and mid not in state["seen_messages"]:
+                    state["seen_messages"].append(mid)
+        state["pending_responses"] = [m for m in state.get("pending_responses", []) if m.get("chat_id") != args.reply_to]
+        save_state(state)
+        print("sent")
+        return
 
     if args.test_text:
         is_spam, details = detect_prospection(args.test_text)
@@ -454,6 +502,13 @@ def main():
     result = check_linkedin_messages(dry_run=args.dry_run)
 
     if args.json:
+        # Also include already-pending messages not in this run
+        state = load_state()
+        pending_ids = {m["message_id"] for m in result.get("messages", [])}
+        carry_over = [m for m in state.get("pending_responses", []) if m.get("message_id") not in pending_ids]
+        if carry_over:
+            result["messages"] = carry_over + result.get("messages", [])
+            result["detected"] = len(result["messages"])
         print(json.dumps(result, ensure_ascii=False))
     else:
         if result.get("status") == "error":
